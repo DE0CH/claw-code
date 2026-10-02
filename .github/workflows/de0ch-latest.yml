@@ -1,0 +1,59 @@
+# DE0CH fork: build `claw` for linux x86_64 on every push to main and publish it as the asset
+# `claw-linux-x86_64` of its own release `de0ch-<sha12>` (and of the moving release `latest`), then pin
+# that exact build in claude-env (fork-pin dispatch -> selfhost/session-image/forks.json -> image build):
+#   https://github.com/DE0CH/claw-code/releases/download/de0ch-<sha12>/claw-linux-x86_64
+name: Publish latest claw (DE0CH)
+
+on:
+  push:
+    branches: [main]
+    paths: ["rust/**", ".github/workflows/de0ch-latest.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: de0ch-latest
+  cancel-in-progress: true
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04 # same glibc as the session image (ubuntu:24.04)
+    defaults:
+      run:
+        working-directory: rust
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust -> target
+      - name: Test the event stream
+        run: |
+          cargo test --release -p runtime event_stream
+          cargo test --release -p api claude_code_identity
+          cargo test --release -p rusty-claude-cli event_stream_prompter
+      - name: Build
+        run: cargo build --release -p rusty-claude-cli
+      - name: Publish release de0ch-<sha12> (+ latest)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cp target/release/claw claw-linux-x86_64
+          ./claw-linux-x86_64 --version
+          TAG="de0ch-${GITHUB_SHA:0:12}"
+          echo "TAG=$TAG" >> "$GITHUB_ENV"
+          gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --target "$GITHUB_SHA" --title "$TAG" --notes "claw built from $GITHUB_SHA by de0ch-latest.yml" --latest=false
+          gh release upload "$TAG" claw-linux-x86_64 --clobber
+          git tag -f latest "$GITHUB_SHA"
+          git push -f origin refs/tags/latest
+          gh release view latest >/dev/null 2>&1 || gh release create latest --title "latest (main)" --notes "moving" --latest=false
+          gh release edit latest --notes "Built from main $GITHUB_SHA by de0ch-latest.yml"
+          gh release upload latest claw-linux-x86_64 --clobber
+      - name: pin in claude-env
+        env: { GH_TOKEN: "${{ secrets.CLAUDE_ENV_DISPATCH_TOKEN }}" }
+        run: |
+          url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/claw-linux-x86_64"
+          gh api repos/DE0CH/claude-env/dispatches -f event_type=fork-pin \
+            -F "client_payload[name]=claw" -F "client_payload[url]=$url" -F "client_payload[sha]=$GITHUB_SHA"

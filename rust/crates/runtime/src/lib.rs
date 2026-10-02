@@ -13,6 +13,7 @@ mod compact;
 mod config;
 pub mod config_validate;
 mod conversation;
+pub mod event_stream;
 mod file_ops;
 pub mod g004_conformance;
 mod git_context;

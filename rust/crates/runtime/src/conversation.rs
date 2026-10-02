@@ -513,6 +513,7 @@ where
                     .push_message(result_message.clone())
                     .map_err(|error| RuntimeError::new(error.to_string()))?;
                 self.record_tool_finished(iterations, &result_message);
+                crate::event_stream::emit_tool_results(&result_message);
                 tool_results.push(result_message);
             }
         }

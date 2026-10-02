@@ -498,8 +498,17 @@ impl AnthropicClient {
             .post(request_url)
             .header("content-type", "application/json");
         let mut request_builder = self.auth.apply(request_builder);
+        let identity = claude_code_identity_version();
         for (header_name, header_value) in self.request_profile.header_pairs() {
+            if identity.is_some() && header_name.eq_ignore_ascii_case("user-agent") {
+                continue;
+            }
             request_builder = request_builder.header(header_name, header_value);
+        }
+        if let Some(version) = identity {
+            request_builder = request_builder
+                .header("user-agent", format!("claude-cli/{version}"))
+                .header("x-app", "cli");
         }
         request_builder
     }
@@ -1046,13 +1055,60 @@ fn render_standard_messages_body(
     wire_request.model = anthropic_wire_model(&request.model).to_string();
     let mut body = request_profile.render_json_body(&wire_request)?;
     strip_unsupported_beta_body_fields(&mut body);
+    if claude_code_identity_version().is_some() {
+        apply_claude_code_identity(&mut body);
+    }
     Ok(body)
+}
+
+/// `CLAW_CLAUDE_CODE_VERSION=<x.y.z>`: present as that Claude Code version. A Claude
+/// subscription OAuth token (sk-ant-oat…) is only accepted from Claude Code: a
+/// `claude-cli/<version>` user agent (new models need a recent version) and the identity
+/// line as the first system block.
+fn claude_code_identity_version() -> Option<String> {
+    std::env::var("CLAW_CLAUDE_CODE_VERSION")
+        .ok()
+        .map(|version| version.trim().to_string())
+        .filter(|version| !version.is_empty())
+}
+
+const CLAUDE_CODE_IDENTITY: &str = "You are Claude Code, Anthropic's official CLI for Claude.";
+
+fn apply_claude_code_identity(body: &mut Value) {
+    let Some(object) = body.as_object_mut() else {
+        return;
+    };
+    let mut blocks = vec![serde_json::json!({"type": "text", "text": CLAUDE_CODE_IDENTITY})];
+    match object.remove("system") {
+        Some(Value::String(text)) if !text.is_empty() => {
+            blocks.push(serde_json::json!({"type": "text", "text": text}));
+        }
+        Some(Value::Array(existing)) => blocks.extend(existing),
+        _ => {}
+    }
+    object.insert("system".to_string(), Value::Array(blocks));
 }
 
 /// Remove beta-only body fields that the standard `/v1/messages` and
 /// `/v1/messages/count_tokens` endpoints reject as `Extra inputs are not
 /// permitted`. The `betas` opt-in is communicated via the `anthropic-beta`
 /// HTTP header on these endpoints, never as a JSON body field.
+#[cfg(test)]
+mod claude_code_identity_tests {
+    use super::apply_claude_code_identity;
+
+    #[test]
+    fn identity_becomes_the_first_system_block() {
+        let mut body = serde_json::json!({"system": "Be brief.", "model": "m"});
+        apply_claude_code_identity(&mut body);
+        assert_eq!(body["system"][0]["text"], super::CLAUDE_CODE_IDENTITY);
+        assert_eq!(body["system"][1], serde_json::json!({"type": "text", "text": "Be brief."}));
+        let mut empty = serde_json::json!({"model": "m"});
+        apply_claude_code_identity(&mut empty);
+        assert_eq!(empty["system"].as_array().map(Vec::len), Some(1));
+    }
+}
+
 fn strip_unsupported_beta_body_fields(body: &mut Value) {
     if let Some(object) = body.as_object_mut() {
         object.remove("betas");

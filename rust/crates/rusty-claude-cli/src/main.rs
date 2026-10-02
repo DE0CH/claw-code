@@ -1074,16 +1074,55 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             // prompter may invoke CliPermissionPrompter::decide(), stdin
             // must remain available for interactive approval; otherwise the
             // prompter's read_line() would hit EOF and deny every request.
-            let stdin_context = if matches!(permission_mode, PermissionMode::DangerFullAccess) {
+            // Event stream (CLAW_EVENT_STREAM=1 + JSON output): stdin is the host's control
+            // channel for permission answers, never prompt context.
+            let event_stream =
+                output_format == CliOutputFormat::Json && runtime::event_stream::requested_by_env();
+            if event_stream {
+                runtime::event_stream::enable();
+            }
+            let stdin_context = if !event_stream
+                && matches!(permission_mode, PermissionMode::DangerFullAccess)
+            {
                 read_piped_stdin()
             } else {
                 None
             };
             let effective_prompt = merge_prompt_with_stdin(&prompt, stdin_context.as_deref());
             let resolved_model = resolve_repl_model(model)?;
-            let mut cli = LiveCli::new(resolved_model, true, allowed_tools, permission_mode)?;
+            let resume = env::var("CLAW_RESUME_SESSION")
+                .ok()
+                .filter(|reference| !reference.trim().is_empty());
+            let built = match resume.as_deref() {
+                Some(reference) => LiveCli::new_resumed(
+                    resolved_model,
+                    allowed_tools,
+                    permission_mode,
+                    reference.trim(),
+                ),
+                None => LiveCli::new(resolved_model, true, allowed_tools, permission_mode),
+            };
+            let mut cli = match built {
+                Ok(cli) => cli,
+                Err(error) => {
+                    runtime::event_stream::emit(json!({"type": "error", "message": error.to_string()}));
+                    return Err(error);
+                }
+            };
+            runtime::event_stream::emit(json!({
+                "type": "session",
+                "session_id": cli.session.id,
+                "path": cli.session.path.display().to_string(),
+                "model": cli.model,
+                "cwd": env::current_dir().map(|path| path.display().to_string()).unwrap_or_default(),
+                "resumed": resume.is_some(),
+                "permission_mode": permission_mode.as_str(),
+            }));
             cli.set_reasoning_effort(reasoning_effort);
-            cli.run_turn_with_output(&effective_prompt, output_format, compact)?;
+            if let Err(error) = cli.run_turn_with_output(&effective_prompt, output_format, compact) {
+                runtime::event_stream::emit(json!({"type": "error", "message": error.to_string()}));
+                return Err(error);
+            }
         }
         CliAction::Doctor {
             output_format,
@@ -7659,6 +7698,42 @@ impl LiveCli {
         Ok(cli)
     }
 
+    /// A LiveCli on an existing managed session (id, path or `latest`), for one-shot
+    /// prompts that continue a conversation (`CLAW_RESUME_SESSION`).
+    fn new_resumed(
+        model: String,
+        allowed_tools: Option<AllowedToolSet>,
+        permission_mode: PermissionMode,
+        reference: &str,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let system_prompt = build_system_prompt(&model)?;
+        let (handle, session) = load_session_reference(reference)?;
+        let session_id = session.session_id.clone();
+        let runtime = build_runtime(
+            session,
+            &handle.id,
+            model.clone(),
+            system_prompt.clone(),
+            true,
+            true,
+            allowed_tools.clone(),
+            permission_mode,
+            None,
+        )?;
+        Ok(Self {
+            model,
+            allowed_tools,
+            permission_mode,
+            system_prompt,
+            runtime,
+            session: SessionHandle {
+                id: session_id,
+                path: handle.path,
+            },
+            prompt_history: Vec::new(),
+        })
+    }
+
     fn set_reasoning_effort(&mut self, effort: Option<String>) {
         if let Some(rt) = self.runtime.runtime.as_mut() {
             rt.api_client_mut().set_reasoning_effort(effort);
@@ -7986,8 +8061,8 @@ impl LiveCli {
 
     fn run_prompt_compact(&mut self, input: &str) -> Result<(), Box<dyn std::error::Error>> {
         let (mut runtime, hook_abort_monitor) = self.prepare_turn_runtime(false)?;
-        let mut permission_prompter = CliPermissionPrompter::new(self.permission_mode);
-        let result = runtime.run_turn(input, Some(&mut permission_prompter));
+        let mut permission_prompter = one_shot_permission_prompter(self.permission_mode);
+        let result = runtime.run_turn(input, Some(permission_prompter.as_mut()));
         hook_abort_monitor.stop();
         let summary = result?;
         self.replace_runtime(runtime)?;
@@ -7999,8 +8074,8 @@ impl LiveCli {
 
     fn run_prompt_compact_json(&mut self, input: &str) -> Result<(), Box<dyn std::error::Error>> {
         let (mut runtime, hook_abort_monitor) = self.prepare_turn_runtime(false)?;
-        let mut permission_prompter = CliPermissionPrompter::new(self.permission_mode);
-        let result = runtime.run_turn(input, Some(&mut permission_prompter));
+        let mut permission_prompter = one_shot_permission_prompter(self.permission_mode);
+        let result = runtime.run_turn(input, Some(permission_prompter.as_mut()));
         hook_abort_monitor.stop();
         let summary = result?;
         self.replace_runtime(runtime)?;
@@ -8024,15 +8099,13 @@ impl LiveCli {
 
     fn run_prompt_json(&mut self, input: &str) -> Result<(), Box<dyn std::error::Error>> {
         let (mut runtime, hook_abort_monitor) = self.prepare_turn_runtime(false)?;
-        let mut permission_prompter = CliPermissionPrompter::new(self.permission_mode);
-        let result = runtime.run_turn(input, Some(&mut permission_prompter));
+        let mut permission_prompter = one_shot_permission_prompter(self.permission_mode);
+        let result = runtime.run_turn(input, Some(permission_prompter.as_mut()));
         hook_abort_monitor.stop();
         let summary = result?;
         self.replace_runtime(runtime)?;
         self.persist_session()?;
-        println!(
-            "{}",
-            json!({
+        let result = json!({
                 "message": final_assistant_text(&summary),
                 "model": self.model,
                 "iterations": summary.iterations,
@@ -8055,8 +8128,15 @@ impl LiveCli {
                             .unwrap_or_else(runtime::ModelPricing::default_sonnet_tier)
                     ).total_cost_usd()
                 )
-            })
-        );
+            });
+        if runtime::event_stream::is_enabled() {
+            let mut event = result;
+            event["type"] = json!("result");
+            event["session_id"] = json!(self.session.id);
+            runtime::event_stream::emit(event);
+        } else {
+            println!("{result}");
+        }
         Ok(())
     }
 
@@ -12476,6 +12556,81 @@ impl runtime::HookProgressReporter for CliHookProgressReporter {
     }
 }
 
+/// The prompter for a one-shot turn: the host answers over the event stream when it is on,
+/// the terminal otherwise.
+fn one_shot_permission_prompter(mode: PermissionMode) -> Box<dyn runtime::PermissionPrompter> {
+    if runtime::event_stream::is_enabled() {
+        Box::new(StreamPermissionPrompter::new(mode, io::BufReader::new(io::stdin())))
+    } else {
+        Box::new(CliPermissionPrompter::new(mode))
+    }
+}
+
+/// Asks the host: emits `permission_request` and reads one `permission_response` line
+/// (matching `request_id`) from `input`. Other lines are skipped; EOF denies.
+struct StreamPermissionPrompter<R: io::BufRead> {
+    current_mode: PermissionMode,
+    input: R,
+    next_id: u64,
+}
+
+impl<R: io::BufRead> StreamPermissionPrompter<R> {
+    fn new(current_mode: PermissionMode, input: R) -> Self {
+        Self {
+            current_mode,
+            input,
+            next_id: 1,
+        }
+    }
+}
+
+impl<R: io::BufRead> runtime::PermissionPrompter for StreamPermissionPrompter<R> {
+    fn decide(
+        &mut self,
+        request: &runtime::PermissionRequest,
+    ) -> runtime::PermissionPromptDecision {
+        let request_id = format!("perm-{}", self.next_id);
+        self.next_id += 1;
+        runtime::event_stream::emit(json!({
+            "type": "permission_request",
+            "request_id": request_id,
+            "tool_name": request.tool_name,
+            "input": runtime::event_stream::tool_input_value(&request.input),
+            "current_mode": self.current_mode.as_str(),
+            "required_mode": request.required_mode.as_str(),
+            "reason": request.reason,
+        }));
+        loop {
+            let mut line = String::new();
+            match self.input.read_line(&mut line) {
+                Ok(0) | Err(_) => {
+                    return runtime::PermissionPromptDecision::Deny {
+                        reason: format!(
+                            "tool '{}' denied: the host closed the control channel",
+                            request.tool_name
+                        ),
+                    }
+                }
+                Ok(_) => {}
+            }
+            let Ok(answer) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
+                continue;
+            };
+            if answer["type"] != "permission_response" || answer["request_id"] != request_id.as_str() {
+                continue;
+            }
+            if answer["allow"].as_bool() == Some(true) {
+                return runtime::PermissionPromptDecision::Allow;
+            }
+            let reason = answer["reason"].as_str().map_or_else(
+                || format!("tool '{}' denied by the host", request.tool_name),
+                ToOwned::to_owned,
+            );
+            return runtime::PermissionPromptDecision::Deny { reason };
+        }
+    }
+}
+
 struct CliPermissionPrompter {
     current_mode: PermissionMode,
 }
@@ -12732,6 +12887,7 @@ impl AnthropicRuntimeClient {
 
             match event {
                 ApiStreamEvent::MessageStart(start) => {
+                    runtime::event_stream::emit(json!({"type": "message_start"}));
                     for block in start.message.content {
                         push_output_block(
                             block,
@@ -12772,6 +12928,7 @@ impl AnthropicRuntimeClient {
                                     .and_then(|()| out.flush())
                                     .map_err(|error| RuntimeError::new(error.to_string()))?;
                             }
+                            runtime::event_stream::emit(json!({"type": "text_delta", "text": &text}));
                             events.push(AssistantEvent::TextDelta(text));
                         }
                     }
@@ -12781,6 +12938,7 @@ impl AnthropicRuntimeClient {
                         }
                     }
                     ContentBlockDelta::ThinkingDelta { thinking } => {
+                        runtime::event_stream::emit(json!({"type": "thinking_delta", "text": &thinking}));
                         if !block_has_thinking_summary {
                             render_thinking_block_summary(out, None, false)?;
                             block_has_thinking_summary = true;
@@ -12819,6 +12977,7 @@ impl AnthropicRuntimeClient {
                         writeln!(out, "\n{}", format_tool_call_start(&name, &input))
                             .and_then(|()| out.flush())
                             .map_err(|error| RuntimeError::new(error.to_string()))?;
+                        runtime::event_stream::emit_tool_use(&id, &name, &input);
                         events.push(AssistantEvent::ToolUse { id, name, input });
                     }
                 }
@@ -12832,6 +12991,7 @@ impl AnthropicRuntimeClient {
                             .and_then(|()| out.flush())
                             .map_err(|error| RuntimeError::new(error.to_string()))?;
                     }
+                    runtime::event_stream::emit(json!({"type": "message_stop"}));
                     events.push(AssistantEvent::MessageStop);
                 }
             }
@@ -12866,6 +13026,7 @@ impl AnthropicRuntimeClient {
                 RuntimeError::new(format_user_visible_api_error(&self.session_id, &error))
             })?;
         let mut events = response_to_events(response, out)?;
+        emit_response_events(&events);
         push_prompt_cache_record(&self.client, &mut events);
         Ok(events)
     }
@@ -13801,6 +13962,24 @@ fn push_output_block(
     Ok(())
 }
 
+/// The non-streaming fallback's events, for the event stream (the streaming path emits as it goes).
+fn emit_response_events(events: &[AssistantEvent]) {
+    if !runtime::event_stream::is_enabled() {
+        return;
+    }
+    runtime::event_stream::emit(json!({"type": "message_start"}));
+    for event in events {
+        match event {
+            AssistantEvent::TextDelta(text) if !text.is_empty() => {
+                runtime::event_stream::emit(json!({"type": "text_delta", "text": text}));
+            }
+            AssistantEvent::ToolUse { id, name, input } => runtime::event_stream::emit_tool_use(id, name, input),
+            _ => {}
+        }
+    }
+    runtime::event_stream::emit(json!({"type": "message_stop"}));
+}
+
 fn response_to_events(
     response: MessageResponse,
     out: &mut (impl Write + ?Sized),
@@ -14012,6 +14191,9 @@ fn convert_messages(messages: &[ConversationMessage]) -> Vec<InputMessage> {
                     ContentBlock::Text { text } => {
                         Some(InputContentBlock::Text { text: text.clone() })
                     }
+                    // An empty thinking block (a model that omits its thinking text) is
+                    // rejected on replay: "each thinking block must contain thinking".
+                    ContentBlock::Thinking { thinking, .. } if thinking.is_empty() => None,
                     ContentBlock::Thinking {
                         thinking,
                         signature,
@@ -19827,5 +20009,43 @@ mod alias_resolution_tests {
         assert!(validate_model_syntax("qwen3.6:27b-nvfp4").is_ok());
         // Empty model still rejected
         assert!(validate_model_syntax("").is_err());
+    }
+}
+
+#[cfg(test)]
+mod event_stream_prompter_tests {
+    use super::StreamPermissionPrompter;
+    use runtime::{PermissionMode, PermissionPromptDecision, PermissionPrompter, PermissionRequest};
+
+    fn request() -> PermissionRequest {
+        PermissionRequest {
+            tool_name: "bash".to_string(),
+            input: r#"{"command":"touch x"}"#.to_string(),
+            current_mode: PermissionMode::WorkspaceWrite,
+            required_mode: PermissionMode::DangerFullAccess,
+            reason: None,
+        }
+    }
+
+    #[test]
+    fn host_answers_over_the_control_channel() {
+        let _guard = runtime::event_stream::TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        runtime::event_stream::start_capture();
+        let input = "noise\n{\"type\":\"permission_response\",\"request_id\":\"perm-9\",\"allow\":true}\n{\"type\":\"permission_response\",\"request_id\":\"perm-1\",\"allow\":true}\n{\"type\":\"permission_response\",\"request_id\":\"perm-2\",\"allow\":false,\"reason\":\"no\"}\n";
+        let mut prompter =
+            StreamPermissionPrompter::new(PermissionMode::WorkspaceWrite, std::io::Cursor::new(input));
+        assert_eq!(prompter.decide(&request()), PermissionPromptDecision::Allow);
+        assert_eq!(
+            prompter.decide(&request()),
+            PermissionPromptDecision::Deny { reason: "no".to_string() }
+        );
+        assert!(matches!(prompter.decide(&request()), PermissionPromptDecision::Deny { .. }));
+        let events = runtime::event_stream::take_capture();
+        assert_eq!(events.len(), 3);
+        assert_eq!(events[0]["type"], "permission_request");
+        assert_eq!(events[0]["request_id"], "perm-1");
+        assert_eq!(events[0]["input"]["command"], "touch x");
     }
 }

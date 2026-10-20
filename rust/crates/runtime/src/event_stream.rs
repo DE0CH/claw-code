@@ -41,7 +41,8 @@ pub fn is_enabled() -> bool {
 /// True when `CLAW_EVENT_STREAM` asks for the stream.
 #[must_use]
 pub fn requested_by_env() -> bool {
-    std::env::var("CLAW_EVENT_STREAM").is_ok_and(|value| matches!(value.trim(), "1" | "true" | "yes"))
+    std::env::var("CLAW_EVENT_STREAM")
+        .is_ok_and(|value| matches!(value.trim(), "1" | "true" | "yes"))
 }
 
 /// Write one event line (no-op unless enabled).
@@ -76,8 +77,16 @@ pub fn emit_tool_results(message: &ConversationMessage) {
         return;
     }
     for block in &message.blocks {
-        if let ContentBlock::ToolResult { tool_use_id, tool_name, output, is_error } = block {
-            emit(json!({"type": "tool_result", "id": tool_use_id, "name": tool_name, "output": output, "is_error": is_error}));
+        if let ContentBlock::ToolResult {
+            tool_use_id,
+            tool_name,
+            output,
+            is_error,
+        } = block
+        {
+            emit(
+                json!({"type": "tool_result", "id": tool_use_id, "name": tool_name, "output": output, "is_error": is_error}),
+            );
         }
     }
 }
@@ -93,7 +102,11 @@ pub fn start_capture() {
 /// Test support: stop capturing and return what was emitted.
 #[must_use]
 pub fn take_capture() -> Vec<Value> {
-    CAPTURE.lock().ok().and_then(|mut capture| capture.take()).unwrap_or_default()
+    CAPTURE
+        .lock()
+        .ok()
+        .and_then(|mut capture| capture.take())
+        .unwrap_or_default()
 }
 
 /// Serialises tests that use the global capture.
@@ -105,15 +118,22 @@ mod tests {
 
     #[test]
     fn captures_tool_use_and_results() {
-        let _guard = TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         start_capture();
         emit_tool_use("t1", "bash", r#"{"command":"ls"}"#);
         emit_tool_use("t2", "bash", "not json");
-        emit_tool_results(&ConversationMessage::tool_result("t1", "bash", "out", false));
+        emit_tool_results(&ConversationMessage::tool_result(
+            "t1", "bash", "out", false,
+        ));
         let lines = take_capture();
         assert_eq!(lines.len(), 3);
         assert_eq!(lines[0]["input"]["command"], "ls");
         assert_eq!(lines[1]["input"], "not json");
-        assert_eq!(lines[2], json!({"type":"tool_result","id":"t1","name":"bash","output":"out","is_error":false}));
+        assert_eq!(
+            lines[2],
+            json!({"type":"tool_result","id":"t1","name":"bash","output":"out","is_error":false})
+        );
     }
 }

@@ -1058,7 +1058,69 @@ fn render_standard_messages_body(
     if claude_code_identity_version().is_some() {
         apply_claude_code_identity(&mut body);
     }
+    if prompt_cache_requested() {
+        apply_prompt_cache_breakpoints(&mut body);
+    }
     Ok(body)
+}
+
+/// `CLAW_PROMPT_CACHE=1` (host mode): ask for prompt caching explicitly. Providers that relay the
+/// Anthropic format (e.g. `OpenRouter`) cache only blocks marked with `cache_control`.
+fn prompt_cache_requested() -> bool {
+    std::env::var("CLAW_PROMPT_CACHE")
+        .is_ok_and(|value| matches!(value.trim(), "1" | "true" | "yes"))
+}
+
+/// Marks the last system block, the last tool and the last block of the last user message with
+/// `cache_control: ephemeral` (three of Anthropic's four breakpoints). Thinking blocks are never marked.
+fn apply_prompt_cache_breakpoints(body: &mut Value) {
+    let Some(object) = body.as_object_mut() else {
+        return;
+    };
+    let mark = || serde_json::json!({"type": "ephemeral"});
+    if let Some(system) = object.get_mut("system") {
+        if let Value::String(text) = system {
+            if !text.is_empty() {
+                *system = serde_json::json!([{"type": "text", "text": text.clone()}]);
+            }
+        }
+        if let Some(last) = system.as_array_mut().and_then(|blocks| blocks.last_mut()) {
+            last["cache_control"] = mark();
+        }
+    }
+    if let Some(last) = object
+        .get_mut("tools")
+        .and_then(Value::as_array_mut)
+        .and_then(|tools| tools.last_mut())
+    {
+        last["cache_control"] = mark();
+    }
+    let Some(message) = object
+        .get_mut("messages")
+        .and_then(Value::as_array_mut)
+        .and_then(|messages| {
+            messages
+                .iter_mut()
+                .rev()
+                .find(|message| message["role"] == "user")
+        })
+    else {
+        return;
+    };
+    if let Value::String(text) = &message["content"] {
+        let text = text.clone();
+        message["content"] = serde_json::json!([{"type": "text", "text": text}]);
+    }
+    if let Some(block) = message["content"].as_array_mut().and_then(|blocks| {
+        blocks.iter_mut().rev().find(|block| {
+            !matches!(
+                block["type"].as_str(),
+                Some("thinking" | "redacted_thinking")
+            )
+        })
+    }) {
+        block["cache_control"] = mark();
+    }
 }
 
 /// `CLAW_CLAUDE_CODE_VERSION=<x.y.z>`: present as that Claude Code version. A Claude
@@ -1094,6 +1156,58 @@ fn apply_claude_code_identity(body: &mut Value) {
 /// permitted`. The `betas` opt-in is communicated via the `anthropic-beta`
 /// HTTP header on these endpoints, never as a JSON body field.
 #[cfg(test)]
+mod prompt_cache_tests {
+    use super::apply_prompt_cache_breakpoints;
+
+    #[test]
+    fn marks_system_last_tool_and_last_user_message() {
+        let mut body = serde_json::json!({
+            "system": "Be brief.",
+            "tools": [{"name": "a"}, {"name": "b"}],
+            "messages": [
+                {"role": "user", "content": "first"},
+                {"role": "assistant", "content": [{"type": "text", "text": "ok"}]},
+                {"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": "t", "content": "x"},
+                    {"type": "text", "text": "more"}
+                ]},
+                {"role": "assistant", "content": [{"type": "text", "text": "partial"}]}
+            ]
+        });
+        apply_prompt_cache_breakpoints(&mut body);
+        let ephemeral = serde_json::json!({"type": "ephemeral"});
+        assert_eq!(body["system"][0]["text"], "Be brief.");
+        assert_eq!(body["system"][0]["cache_control"], ephemeral);
+        assert!(body["tools"][0].get("cache_control").is_none());
+        assert_eq!(body["tools"][1]["cache_control"], ephemeral);
+        assert_eq!(body["messages"][0]["content"], "first");
+        assert!(body["messages"][2]["content"][0]
+            .get("cache_control")
+            .is_none());
+        assert_eq!(
+            body["messages"][2]["content"][1]["cache_control"],
+            ephemeral
+        );
+        let marks = body.to_string().matches("ephemeral").count();
+        assert!(marks <= 4, "{marks} breakpoints");
+    }
+
+    #[test]
+    fn string_content_becomes_a_marked_block_and_empty_bodies_are_left_alone() {
+        let mut body = serde_json::json!({"messages": [{"role": "user", "content": "hi"}]});
+        apply_prompt_cache_breakpoints(&mut body);
+        assert_eq!(body["messages"][0]["content"][0]["text"], "hi");
+        assert_eq!(
+            body["messages"][0]["content"][0]["cache_control"]["type"],
+            "ephemeral"
+        );
+        let mut bare = serde_json::json!({"model": "m"});
+        apply_prompt_cache_breakpoints(&mut bare);
+        assert_eq!(bare, serde_json::json!({"model": "m"}));
+    }
+}
+
+#[cfg(test)]
 mod claude_code_identity_tests {
     use super::apply_claude_code_identity;
 
@@ -1102,7 +1216,10 @@ mod claude_code_identity_tests {
         let mut body = serde_json::json!({"system": "Be brief.", "model": "m"});
         apply_claude_code_identity(&mut body);
         assert_eq!(body["system"][0]["text"], super::CLAUDE_CODE_IDENTITY);
-        assert_eq!(body["system"][1], serde_json::json!({"type": "text", "text": "Be brief."}));
+        assert_eq!(
+            body["system"][1],
+            serde_json::json!({"type": "text", "text": "Be brief."})
+        );
         let mut empty = serde_json::json!({"model": "m"});
         apply_claude_code_identity(&mut empty);
         assert_eq!(empty["system"].as_array().map(Vec::len), Some(1));

@@ -37,10 +37,12 @@ impl SessionStore {
         // workspace_fingerprint. Falls back to the raw path if canonicalize
         // fails (e.g. the directory doesn't exist yet).
         let canonical_cwd = fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
-        let sessions_root = canonical_cwd
-            .join(".claw")
-            .join("sessions")
-            .join(workspace_fingerprint(&canonical_cwd));
+        let sessions_root = crate::host_mode::sessions_dir().unwrap_or_else(|| {
+            canonical_cwd
+                .join(".claw")
+                .join("sessions")
+                .join(workspace_fingerprint(&canonical_cwd))
+        });
         Ok(Self {
             sessions_root,
             workspace_root: canonical_cwd,
@@ -362,6 +364,10 @@ impl SessionStore {
         session_path: &Path,
         session: &Session,
     ) -> Result<(), SessionControlError> {
+        // Host mode: the host owns the session files and their workdir.
+        if crate::host_mode::sessions_dir().is_some() {
+            return Ok(());
+        }
         let Some(actual) = session.workspace_root() else {
             if path_is_within_workspace(session_path, &self.workspace_root) {
                 return Ok(());

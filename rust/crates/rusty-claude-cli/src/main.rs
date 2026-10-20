@@ -1081,13 +1081,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             if event_stream {
                 runtime::event_stream::enable();
             }
-            let stdin_context = if !event_stream
-                && matches!(permission_mode, PermissionMode::DangerFullAccess)
-            {
-                read_piped_stdin()
-            } else {
-                None
-            };
+            let stdin_context =
+                if !event_stream && matches!(permission_mode, PermissionMode::DangerFullAccess) {
+                    read_piped_stdin()
+                } else {
+                    None
+                };
             let effective_prompt = merge_prompt_with_stdin(&prompt, stdin_context.as_deref());
             let resolved_model = resolve_repl_model(model)?;
             let resume = env::var("CLAW_RESUME_SESSION")
@@ -1105,7 +1104,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             let mut cli = match built {
                 Ok(cli) => cli,
                 Err(error) => {
-                    runtime::event_stream::emit(json!({"type": "error", "message": error.to_string()}));
+                    runtime::event_stream::emit(
+                        json!({"type": "error", "message": error.to_string()}),
+                    );
                     return Err(error);
                 }
             };
@@ -1119,7 +1120,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 "permission_mode": permission_mode.as_str(),
             }));
             cli.set_reasoning_effort(reasoning_effort);
-            if let Err(error) = cli.run_turn_with_output(&effective_prompt, output_format, compact) {
+            if let Err(error) = cli.run_turn_with_output(&effective_prompt, output_format, compact)
+            {
                 runtime::event_stream::emit(json!({"type": "error", "message": error.to_string()}));
                 return Err(error);
             }
@@ -8106,29 +8108,29 @@ impl LiveCli {
         self.replace_runtime(runtime)?;
         self.persist_session()?;
         let result = json!({
-                "message": final_assistant_text(&summary),
-                "model": self.model,
-                "iterations": summary.iterations,
-                "auto_compaction": summary.auto_compaction.map(|event| json!({
-                    "removed_messages": event.removed_message_count,
-                    "notice": format_auto_compaction_notice(event.removed_message_count),
-                })),
-                "tool_uses": collect_tool_uses(&summary),
-                "tool_results": collect_tool_results(&summary),
-                "prompt_cache_events": collect_prompt_cache_events(&summary),
-                "usage": {
-                    "input_tokens": summary.usage.input_tokens,
-                    "output_tokens": summary.usage.output_tokens,
-                    "cache_creation_input_tokens": summary.usage.cache_creation_input_tokens,
-                    "cache_read_input_tokens": summary.usage.cache_read_input_tokens,
-                },
-                "estimated_cost": format_usd(
-                    summary.usage.estimate_cost_usd_with_pricing(
-                        pricing_for_model(&self.model)
-                            .unwrap_or_else(runtime::ModelPricing::default_sonnet_tier)
-                    ).total_cost_usd()
-                )
-            });
+            "message": final_assistant_text(&summary),
+            "model": self.model,
+            "iterations": summary.iterations,
+            "auto_compaction": summary.auto_compaction.map(|event| json!({
+                "removed_messages": event.removed_message_count,
+                "notice": format_auto_compaction_notice(event.removed_message_count),
+            })),
+            "tool_uses": collect_tool_uses(&summary),
+            "tool_results": collect_tool_results(&summary),
+            "prompt_cache_events": collect_prompt_cache_events(&summary),
+            "usage": {
+                "input_tokens": summary.usage.input_tokens,
+                "output_tokens": summary.usage.output_tokens,
+                "cache_creation_input_tokens": summary.usage.cache_creation_input_tokens,
+                "cache_read_input_tokens": summary.usage.cache_read_input_tokens,
+            },
+            "estimated_cost": format_usd(
+                summary.usage.estimate_cost_usd_with_pricing(
+                    pricing_for_model(&self.model)
+                        .unwrap_or_else(runtime::ModelPricing::default_sonnet_tier)
+                ).total_cost_usd()
+            )
+        });
         if runtime::event_stream::is_enabled() {
             let mut event = result;
             event["type"] = json!("result");
@@ -11951,6 +11953,13 @@ fn short_tool_id(id: &str) -> String {
 }
 
 fn build_system_prompt(model: &str) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    if let Some(path) = runtime::host_mode::system_prompt_file() {
+        return Ok(runtime::host_mode::host_system_prompt(
+            &path,
+            &env::current_dir()?,
+            &runtime::host_mode::today_utc(),
+        )?);
+    }
     Ok(load_system_prompt(
         env::current_dir()?,
         DEFAULT_DATE,
@@ -12560,7 +12569,10 @@ impl runtime::HookProgressReporter for CliHookProgressReporter {
 /// the terminal otherwise.
 fn one_shot_permission_prompter(mode: PermissionMode) -> Box<dyn runtime::PermissionPrompter> {
     if runtime::event_stream::is_enabled() {
-        Box::new(StreamPermissionPrompter::new(mode, io::BufReader::new(io::stdin())))
+        Box::new(StreamPermissionPrompter::new(
+            mode,
+            io::BufReader::new(io::stdin()),
+        ))
     } else {
         Box::new(CliPermissionPrompter::new(mode))
     }
@@ -12616,7 +12628,9 @@ impl<R: io::BufRead> runtime::PermissionPrompter for StreamPermissionPrompter<R>
             let Ok(answer) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
                 continue;
             };
-            if answer["type"] != "permission_response" || answer["request_id"] != request_id.as_str() {
+            if answer["type"] != "permission_response"
+                || answer["request_id"] != request_id.as_str()
+            {
                 continue;
             }
             if answer["allow"].as_bool() == Some(true) {
@@ -12928,7 +12942,9 @@ impl AnthropicRuntimeClient {
                                     .and_then(|()| out.flush())
                                     .map_err(|error| RuntimeError::new(error.to_string()))?;
                             }
-                            runtime::event_stream::emit(json!({"type": "text_delta", "text": &text}));
+                            runtime::event_stream::emit(
+                                json!({"type": "text_delta", "text": &text}),
+                            );
                             events.push(AssistantEvent::TextDelta(text));
                         }
                     }
@@ -12938,7 +12954,9 @@ impl AnthropicRuntimeClient {
                         }
                     }
                     ContentBlockDelta::ThinkingDelta { thinking } => {
-                        runtime::event_stream::emit(json!({"type": "thinking_delta", "text": &thinking}));
+                        runtime::event_stream::emit(
+                            json!({"type": "thinking_delta", "text": &thinking}),
+                        );
                         if !block_has_thinking_summary {
                             render_thinking_block_summary(out, None, false)?;
                             block_has_thinking_summary = true;
@@ -13973,7 +13991,9 @@ fn emit_response_events(events: &[AssistantEvent]) {
             AssistantEvent::TextDelta(text) if !text.is_empty() => {
                 runtime::event_stream::emit(json!({"type": "text_delta", "text": text}));
             }
-            AssistantEvent::ToolUse { id, name, input } => runtime::event_stream::emit_tool_use(id, name, input),
+            AssistantEvent::ToolUse { id, name, input } => {
+                runtime::event_stream::emit_tool_use(id, name, input)
+            }
             _ => {}
         }
     }
@@ -20015,7 +20035,9 @@ mod alias_resolution_tests {
 #[cfg(test)]
 mod event_stream_prompter_tests {
     use super::StreamPermissionPrompter;
-    use runtime::{PermissionMode, PermissionPromptDecision, PermissionPrompter, PermissionRequest};
+    use runtime::{
+        PermissionMode, PermissionPromptDecision, PermissionPrompter, PermissionRequest,
+    };
 
     fn request() -> PermissionRequest {
         PermissionRequest {
@@ -20034,14 +20056,21 @@ mod event_stream_prompter_tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         runtime::event_stream::start_capture();
         let input = "noise\n{\"type\":\"permission_response\",\"request_id\":\"perm-9\",\"allow\":true}\n{\"type\":\"permission_response\",\"request_id\":\"perm-1\",\"allow\":true}\n{\"type\":\"permission_response\",\"request_id\":\"perm-2\",\"allow\":false,\"reason\":\"no\"}\n";
-        let mut prompter =
-            StreamPermissionPrompter::new(PermissionMode::WorkspaceWrite, std::io::Cursor::new(input));
+        let mut prompter = StreamPermissionPrompter::new(
+            PermissionMode::WorkspaceWrite,
+            std::io::Cursor::new(input),
+        );
         assert_eq!(prompter.decide(&request()), PermissionPromptDecision::Allow);
         assert_eq!(
             prompter.decide(&request()),
-            PermissionPromptDecision::Deny { reason: "no".to_string() }
+            PermissionPromptDecision::Deny {
+                reason: "no".to_string()
+            }
         );
-        assert!(matches!(prompter.decide(&request()), PermissionPromptDecision::Deny { .. }));
+        assert!(matches!(
+            prompter.decide(&request()),
+            PermissionPromptDecision::Deny { .. }
+        ));
         let events = runtime::event_stream::take_capture();
         assert_eq!(events.len(), 3);
         assert_eq!(events[0]["type"], "permission_request");

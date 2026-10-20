@@ -19,6 +19,7 @@ pub mod g004_conformance;
 mod git_context;
 pub mod green_contract;
 mod hooks;
+pub mod host_mode;
 mod json;
 mod lane_events;
 pub mod lsp_client;

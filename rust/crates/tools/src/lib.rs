@@ -2294,7 +2294,12 @@ fn looks_like_windows_absolute_path(token: &str) -> bool {
 }
 
 fn run_bash(input: BashCommandInput) -> Result<String, String> {
-    if let Some(output) = workspace_test_branch_preflight(&input.command) {
+    // Host mode (CLAW_BASH_COMMAND): commands run in the host's sandbox, not this checkout.
+    let local = runtime::host_mode::bash_command().is_none();
+    if let Some(output) = local
+        .then(|| workspace_test_branch_preflight(&input.command))
+        .flatten()
+    {
         return serde_json::to_string_pretty(&output).map_err(|error| error.to_string());
     }
     serde_json::to_string_pretty(&execute_bash(input).map_err(|error| error.to_string())?)

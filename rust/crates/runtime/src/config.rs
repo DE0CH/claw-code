@@ -434,6 +434,12 @@ impl ConfigLoader {
 
     #[must_use]
     pub fn discover(&self) -> Vec<ConfigEntry> {
+        if let Some(dir) = crate::host_mode::config_dir() {
+            return vec![ConfigEntry {
+                source: ConfigSource::User,
+                path: dir.join("settings.json"),
+            }];
+        }
         let user_legacy_path = self.config_home.parent().map_or_else(
             || PathBuf::from(".claw.json"),
             |parent| parent.join(".claw.json"),
@@ -1102,6 +1108,9 @@ impl RuntimePluginConfig {
 #[must_use]
 /// Returns the default per-user config directory used by the runtime.
 pub fn default_config_home() -> PathBuf {
+    if let Some(dir) = crate::host_mode::config_dir() {
+        return dir;
+    }
     std::env::var_os("CLAW_CONFIG_HOME")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".claw")))

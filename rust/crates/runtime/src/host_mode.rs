@@ -8,6 +8,7 @@
 //! | `CLAW_CONFIG_DIR` | the only config dir read; nothing is read from the cwd or the home dir |
 //! | `CLAW_SESSIONS_DIR` | where managed sessions live; resuming skips the workspace-root check |
 //! | `CLAW_PROMPT_CACHE=1` | Anthropic requests carry `cache_control` breakpoints (in the `api` crate) |
+//! | `CLAW_IMAGES=1` | `read_file` shows images and PDF pages to the model; `CLAW_PROMPT_IMAGES` attaches images to the prompt (`images.rs`) |
 //!
 //! See `docs/event-stream.md`.
 use std::env;

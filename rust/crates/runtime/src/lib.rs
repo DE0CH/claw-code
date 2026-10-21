@@ -20,6 +20,7 @@ mod git_context;
 pub mod green_contract;
 mod hooks;
 pub mod host_mode;
+pub mod images;
 mod json;
 mod lane_events;
 pub mod lsp_client;
@@ -174,8 +175,8 @@ pub use sandbox::{
     SandboxRequest, SandboxStatus,
 };
 pub use session::{
-    ContentBlock, ConversationMessage, MessageRole, Session, SessionCompaction, SessionError,
-    SessionFork, SessionHeartbeat, SessionLiveness, SessionPromptEntry,
+    ContentBlock, ConversationMessage, ImageRef, MessageRole, Session, SessionCompaction,
+    SessionError, SessionFork, SessionHeartbeat, SessionLiveness, SessionPromptEntry,
 };
 pub use sse::{IncrementalSseParser, SseEvent};
 pub use stale_base::{

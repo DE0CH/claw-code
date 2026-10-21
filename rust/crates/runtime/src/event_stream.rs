@@ -8,7 +8,9 @@
 //!   text_delta       {text}
 //!   thinking_delta   {text}
 //!   tool_use         {id, name, input}            input = parsed JSON (raw string if unparsable)
-//!   tool_result      {id, name, output, is_error}
+//!   tool_result      {id, name, output, is_error, images?}
+//!                    images (CLAW_IMAGES): [{path, sha256, media_type, width, height, page?}]
+//!   prompt_images    {images} (CLAW_IMAGES + CLAW_PROMPT_IMAGES): the prompt's attached images
 //!   message_stop     a model response ended
 //!   permission_request {request_id, tool_name, input, current_mode, required_mode, reason}
 //!                    the host answers on stdin with one line:
@@ -76,7 +78,7 @@ pub fn emit_tool_results(message: &ConversationMessage) {
     if !is_enabled() {
         return;
     }
-    for block in &message.blocks {
+    for (index, block) in message.blocks.iter().enumerate() {
         if let ContentBlock::ToolResult {
             tool_use_id,
             tool_name,
@@ -84,9 +86,19 @@ pub fn emit_tool_results(message: &ConversationMessage) {
             is_error,
         } = block
         {
-            emit(
-                json!({"type": "tool_result", "id": tool_use_id, "name": tool_name, "output": output, "is_error": is_error}),
-            );
+            let mut event = json!({"type": "tool_result", "id": tool_use_id, "name": tool_name, "output": output, "is_error": is_error});
+            // CLAW_IMAGES: the images that follow this result (what the model was shown)
+            let images = message.blocks[index + 1..]
+                .iter()
+                .map_while(|block| match block {
+                    ContentBlock::Image { image } => Some(crate::images::ref_json(image)),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            if !images.is_empty() {
+                event["images"] = Value::Array(images);
+            }
+            emit(event);
         }
     }
 }
@@ -134,6 +146,31 @@ mod tests {
         assert_eq!(
             lines[2],
             json!({"type":"tool_result","id":"t1","name":"bash","output":"out","is_error":false})
+        );
+    }
+
+    #[test]
+    fn tool_result_events_list_the_images_shown() {
+        let _guard = TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        start_capture();
+        let image = crate::session::ImageRef {
+            path: "out/chart.png".to_string(),
+            sha256: "ab".repeat(32),
+            media_type: "image/png".to_string(),
+            page: None,
+            width: 640,
+            height: 480,
+        };
+        emit_tool_results(&crate::images::with_images(
+            ConversationMessage::tool_result("t1", "read_file", "Image out/chart.png", false),
+            vec![image],
+        ));
+        let lines = take_capture();
+        assert_eq!(
+            lines[0]["images"],
+            json!([{"path": "out/chart.png", "sha256": "ab".repeat(32), "media_type": "image/png", "width": 640, "height": 480}])
         );
     }
 }

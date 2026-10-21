@@ -1281,7 +1281,7 @@ pub fn translate_message(message: &InputMessage, model: &str) -> Vec<Value> {
                             "arguments": input.to_string(),
                         }
                     })),
-                    InputContentBlock::ToolResult { .. } => {}
+                    InputContentBlock::ToolResult { .. } | InputContentBlock::Image { .. } => {}
                 }
             }
             let needs_reasoning = model_requires_reasoning_content_in_history(model);
@@ -1332,6 +1332,13 @@ pub fn translate_message(message: &InputMessage, model: &str) -> Vec<Value> {
                     }
                     Some(msg)
                 }
+                InputContentBlock::Image { source } => Some(json!({
+                    "role": "user",
+                    "content": [{
+                        "type": "image_url",
+                        "image_url": {"url": format!("data:{};base64,{}", source.media_type, source.data)},
+                    }],
+                })),
                 InputContentBlock::Thinking { .. } | InputContentBlock::ToolUse { .. } => None,
             })
             .collect(),
@@ -1419,6 +1426,7 @@ pub fn flatten_tool_result_content(content: &[ToolResultContentBlock]) -> String
         .map(|block| match block {
             ToolResultContentBlock::Text { text } => text.len(),
             ToolResultContentBlock::Json { value } => value.to_string().len(),
+            ToolResultContentBlock::Image { .. } => IMAGE_PLACEHOLDER.len(),
         })
         .sum();
 
@@ -1436,10 +1444,14 @@ pub fn flatten_tool_result_content(content: &[ToolResultContentBlock]) -> String
                 // Use write! to append without creating intermediate String
                 result.push_str(&value.to_string());
             }
+            ToolResultContentBlock::Image { .. } => result.push_str(IMAGE_PLACEHOLDER),
         }
     }
     result
 }
+
+/// Tool-result images are not sent in the OpenAI-compatible format.
+const IMAGE_PLACEHOLDER: &str = "[image]";
 
 /// Recursively ensure every object-type node in a JSON Schema has
 /// `"properties"` (at least `{}`) and `"additionalProperties": false`.

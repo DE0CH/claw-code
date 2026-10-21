@@ -220,7 +220,9 @@ fn summarize_messages(messages: &[ConversationMessage]) -> String {
         .filter_map(|block| match block {
             ContentBlock::ToolUse { name, .. } => Some(name.as_str()),
             ContentBlock::ToolResult { tool_name, .. } => Some(tool_name.as_str()),
-            ContentBlock::Text { .. } | ContentBlock::Thinking { .. } => None,
+            ContentBlock::Text { .. }
+            | ContentBlock::Thinking { .. }
+            | ContentBlock::Image { .. } => None,
         })
         .collect::<Vec<_>>();
     tool_names.sort_unstable();
@@ -340,6 +342,7 @@ fn summarize_block(block: &ContentBlock) -> String {
             "tool_result {tool_name}: {}{output}",
             if *is_error { "error " } else { "" }
         ),
+        ContentBlock::Image { image } => format!("image {}", image.path),
     };
     truncate_summary(&raw, 160)
 }
@@ -392,6 +395,7 @@ fn collect_key_files(messages: &[ConversationMessage]) -> Vec<String> {
             ContentBlock::ToolUse { input, .. } => input.as_str(),
             ContentBlock::ToolResult { output, .. } => output.as_str(),
             ContentBlock::Thinking { thinking, .. } => thinking.as_str(),
+            ContentBlock::Image { image } => image.path.as_str(),
         })
         .flat_map(extract_file_candidates)
         .collect::<Vec<_>>();
@@ -415,6 +419,7 @@ fn first_text_block(message: &ConversationMessage) -> Option<&str> {
         ContentBlock::ToolUse { .. }
         | ContentBlock::ToolResult { .. }
         | ContentBlock::Thinking { .. }
+        | ContentBlock::Image { .. }
         | ContentBlock::Text { .. } => None,
     })
 }
@@ -469,6 +474,10 @@ fn estimate_message_tokens(message: &ConversationMessage) -> usize {
                 thinking,
                 signature,
             } => thinking.len() / 4 + signature.as_ref().map_or(0, |value| value.len() / 4 + 1),
+            // Anthropic's estimate: width x height / 750 tokens
+            ContentBlock::Image { image } => {
+                (image.width as usize * image.height as usize) / 750 + 1
+            }
         })
         .sum()
 }

@@ -49,6 +49,68 @@ pub enum ContentBlock {
         output: String,
         is_error: bool,
     },
+    /// An image the model sees (host mode `CLAW_IMAGES=1`): in a user message (an attached
+    /// image) or in a tool message right after the `ToolResult` it belongs to. Stored as a
+    /// reference to the workdir file, never as bytes; the request builder rehydrates it.
+    Image {
+        image: ImageRef,
+    },
+}
+
+/// Where an image's bytes come from: a workdir file (as the model or host named it, relative to
+/// the cwd), the sha256 of that file's bytes when it was viewed, the media type sent to the model,
+/// the PDF page it shows, and the size sent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImageRef {
+    pub path: String,
+    pub sha256: String,
+    pub media_type: String,
+    pub page: Option<u32>,
+    pub width: u32,
+    pub height: u32,
+}
+
+impl ImageRef {
+    #[must_use]
+    pub fn to_json(&self) -> JsonValue {
+        let mut object = BTreeMap::new();
+        object.insert("type".to_string(), JsonValue::String("image".to_string()));
+        object.insert("path".to_string(), JsonValue::String(self.path.clone()));
+        object.insert("sha256".to_string(), JsonValue::String(self.sha256.clone()));
+        object.insert(
+            "media_type".to_string(),
+            JsonValue::String(self.media_type.clone()),
+        );
+        if let Some(page) = self.page {
+            object.insert("page".to_string(), JsonValue::Number(i64::from(page)));
+        }
+        object.insert(
+            "width".to_string(),
+            JsonValue::Number(i64::from(self.width)),
+        );
+        object.insert(
+            "height".to_string(),
+            JsonValue::Number(i64::from(self.height)),
+        );
+        JsonValue::Object(object)
+    }
+
+    fn from_json_object(object: &BTreeMap<String, JsonValue>) -> Result<Self, SessionError> {
+        let number = |key: &str| {
+            object
+                .get(key)
+                .and_then(JsonValue::as_i64)
+                .and_then(|value| u32::try_from(value).ok())
+        };
+        Ok(Self {
+            path: required_string(object, "path")?,
+            sha256: required_string(object, "sha256")?,
+            media_type: required_string(object, "media_type")?,
+            page: number("page"),
+            width: number("width").unwrap_or(0),
+            height: number("height").unwrap_or(0),
+        })
+    }
 }
 
 /// One conversation message with optional token-usage metadata.
@@ -870,6 +932,7 @@ impl ContentBlock {
                 object.insert("output".to_string(), JsonValue::String(output.clone()));
                 object.insert("is_error".to_string(), JsonValue::Bool(*is_error));
             }
+            Self::Image { image } => return image.to_json(),
         }
         JsonValue::Object(object)
     }
@@ -906,6 +969,9 @@ impl ContentBlock {
                     .get("is_error")
                     .and_then(JsonValue::as_bool)
                     .ok_or_else(|| SessionError::Format("missing is_error".to_string()))?,
+            }),
+            "image" => Ok(Self::Image {
+                image: ImageRef::from_json_object(object)?,
             }),
             other => Err(SessionError::Format(format!(
                 "unsupported block type: {other}"
@@ -1131,6 +1197,7 @@ fn persisted_block_json(block: &ContentBlock) -> JsonValue {
             );
             object.insert("is_error".to_string(), JsonValue::Bool(*is_error));
         }
+        ContentBlock::Image { image } => return image.to_json(),
     }
     JsonValue::Object(object)
 }
@@ -1421,8 +1488,8 @@ fn cleanup_rotated_logs(path: &Path) -> Result<(), SessionError> {
 mod tests {
     use super::{
         cleanup_rotated_logs, current_time_millis, parse_created_at_ms_from_session_id,
-        rotate_session_file_if_needed, ContentBlock, ConversationMessage, MessageRole, Session,
-        SessionFork,
+        rotate_session_file_if_needed, ContentBlock, ConversationMessage, ImageRef, MessageRole,
+        Session, SessionFork,
     };
     use crate::json::JsonValue;
     use crate::usage::TokenUsage;
@@ -1484,6 +1551,77 @@ mod tests {
             17
         );
         assert_eq!(restored.session_id, session.session_id);
+    }
+
+    #[test]
+    fn image_references_round_trip_through_jsonl_without_bytes() {
+        let image = ImageRef {
+            path: "uploads/photo.png".to_string(),
+            sha256: "ab".repeat(32),
+            media_type: "image/png".to_string(),
+            page: None,
+            width: 800,
+            height: 600,
+        };
+        let pdf_page = ImageRef {
+            path: "report.pdf".to_string(),
+            sha256: "cd".repeat(32),
+            media_type: "image/png".to_string(),
+            page: Some(2),
+            width: 1109,
+            height: 1568,
+        };
+        let mut session = Session::new();
+        session
+            .push_message(ConversationMessage {
+                role: MessageRole::User,
+                blocks: vec![
+                    ContentBlock::Image {
+                        image: image.clone(),
+                    },
+                    ContentBlock::Text {
+                        text: "what is this?".to_string(),
+                    },
+                ],
+                usage: None,
+            })
+            .expect("user message should append");
+        let mut result =
+            ConversationMessage::tool_result("t1", "read_file", "PDF report.pdf", false);
+        result.blocks.push(ContentBlock::Image {
+            image: pdf_page.clone(),
+        });
+        session
+            .push_message(result)
+            .expect("tool result should append");
+
+        let path = temp_session_path("images");
+        session.save_to_path(&path).expect("session should save");
+        let text = fs::read_to_string(&path).expect("session file");
+        let restored = Session::load_from_path(&path).expect("session should load");
+        fs::remove_file(&path).expect("temp file should be removable");
+
+        assert_eq!(restored, session);
+        assert!(text.contains("\"image\""), "{text}");
+        assert!(text.contains("report.pdf"), "{text}");
+        assert!(!text.contains("base64"), "{text}");
+        assert_eq!(
+            restored.messages[1].blocks[1],
+            ContentBlock::Image { image: pdf_page }
+        );
+    }
+
+    #[test]
+    fn sessions_without_image_blocks_still_load() {
+        let path = write_temp_session_file(
+            "no-images",
+            r#"{"type":"session_meta","version":1,"session_id":"old","created_at_ms":1,"updated_at_ms":1}
+{"type":"message","message":{"role":"user","blocks":[{"type":"text","text":"hi"}]}}
+{"type":"message","message":{"role":"tool","blocks":[{"type":"tool_result","tool_use_id":"t","tool_name":"bash","output":"ok","is_error":false}]}}"#,
+        );
+        let restored = Session::load_from_path(&path).expect("old session should load");
+        fs::remove_file(&path).expect("temp file should be removable");
+        assert_eq!(restored.messages.len(), 2);
     }
 
     #[test]

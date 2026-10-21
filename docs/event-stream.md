@@ -16,7 +16,7 @@ stdout is NDJSON, one object per line with a `type`:
 | `text_delta` | `text` |
 | `thinking_delta` | `text` (may be empty when the model omits its thinking) |
 | `tool_use` | `id`, `name`, `input` (parsed JSON, raw string if unparsable) |
-| `tool_result` | `id`, `name`, `output`, `is_error` |
+| `tool_result` | `id`, `name`, `output`, `is_error`; `images` with `CLAW_IMAGES` when the result shows images |
 | `permission_request` | `request_id`, `tool_name`, `input`, `current_mode`, `required_mode`, `reason` |
 | `result` | the turn summary (`message`, `usage`, `iterations`, `tool_uses`, `tool_results`, `session_id`, …) |
 | `error` | `message` (claw then exits non-zero; its usual JSON error envelope, with no `type`, may follow) |
@@ -48,6 +48,8 @@ For hosts that run claw on a server, one process per chat turn (the Jarvis 3 cha
 | `CLAW_CONFIG_DIR=<dir>` | `<dir>/settings.json` is the only config read (`mcpServers`, `permissions`, hooks); nothing from the cwd (`.claw.json`, `.claw/settings*.json`) or `~` |
 | `CLAW_SESSIONS_DIR=<dir>` | managed sessions are `<dir>/<id>.jsonl` (the `session` event's `path`); `CLAW_RESUME_SESSION=<absolute path>` resumes without the workspace-root check |
 | `CLAW_PROMPT_CACHE=1` | Anthropic-format requests mark the last system block, the last tool and the last user message with `cache_control: {"type":"ephemeral"}` (relays such as OpenRouter cache only marked blocks) |
+| `CLAW_IMAGES=1` | the model sees images: `read_file` on png/jpeg/webp/gif (heic/heif, bmp, tiff, svg converted to PNG) or a PDF page (`page`, default 1, via `pdftoppm`) returns the image in the tool result; long edge ≤ 1568 px and ≤ 5 MB base64 (files already within are sent unchanged); at most 20 new images per run (then a text note), at most 40 image blocks per request (older ones become `[earlier image <path> omitted]`). The session stores a reference `{"type":"image","path","sha256","media_type","page"?,"width","height"}` (path relative to the cwd, sha256 of the file), never bytes; each request rehydrates it from the cwd, and a file that changed or is gone becomes a text note. `tool_result` events carry `images: [{path, sha256, media_type, width, height, page?}]`. Converters on PATH: `pdfinfo`/`pdftoppm` (poppler-utils), `heif-dec`/`heif-convert` (libheif-examples) or ImageMagick, `rsvg-convert` (librsvg2-bin) or ImageMagick |
+| `CLAW_PROMPT_IMAGES` | with `CLAW_IMAGES=1`: a JSON array of cwd-relative paths attached as images before the prompt's text (same rules; a file that can't be shown becomes `[attached image <path> could not be shown: <reason>]`); emits `{"type":"prompt_images","images":[…]}` |
 
 **Bash helper contract.** claw runs `$CLAW_BASH_COMMAND` with cwd = claw's cwd and one JSON object on stdin:
 `{"command", "timeout" (ms or null), "description", "run_in_background"}`. The helper prints one JSON object:

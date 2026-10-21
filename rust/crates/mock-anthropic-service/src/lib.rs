@@ -302,6 +302,9 @@ fn flatten_tool_result_content(content: &[api::ToolResultContentBlock]) -> Strin
         .map(|block| match block {
             api::ToolResultContentBlock::Text { text } => text.clone(),
             api::ToolResultContentBlock::Json { value } => value.to_string(),
+            api::ToolResultContentBlock::Image { source } => {
+                format!("[image {}]", source.media_type)
+            }
         })
         .collect::<Vec<_>>()
         .join("\n")

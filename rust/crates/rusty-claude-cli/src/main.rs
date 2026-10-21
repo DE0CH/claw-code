@@ -11674,6 +11674,7 @@ fn render_export_text(session: &Session) -> String {
                         "[tool_result id={tool_use_id} name={tool_name} error={is_error}] {output}"
                     ));
                 }
+                ContentBlock::Image { image } => lines.push(format!("[image {}]", image.path)),
             }
         }
         lines.push(String::new());
@@ -11925,6 +11926,10 @@ fn render_session_markdown(session: &Session, session_id: &str, session_path: &P
                     if !summary.is_empty() {
                         lines.push(format!("> {summary}"));
                     }
+                    lines.push(String::new());
+                }
+                ContentBlock::Image { image } => {
+                    lines.push(format!("**Image** `{}`", image.path));
                     lines.push(String::new());
                 }
             }
@@ -14197,6 +14202,8 @@ fn permission_policy(
 }
 
 fn convert_messages(messages: &[ConversationMessage]) -> Vec<InputMessage> {
+    // CLAW_IMAGES: image references are rehydrated from the workdir
+    let mut images = api::images::ImageAttacher::new(messages);
     messages
         .iter()
         .filter_map(|message| {
@@ -14204,10 +14211,13 @@ fn convert_messages(messages: &[ConversationMessage]) -> Vec<InputMessage> {
                 MessageRole::System | MessageRole::User | MessageRole::Tool => "user",
                 MessageRole::Assistant => "assistant",
             };
-            let content = message
-                .blocks
-                .iter()
-                .filter_map(|block| match block {
+            let mut content = Vec::new();
+            for block in &message.blocks {
+                if let ContentBlock::Image { image } = block {
+                    images.attach(&mut content, image);
+                    continue;
+                }
+                content.extend(match block {
                     ContentBlock::Text { text } => {
                         Some(InputContentBlock::Text { text: text.clone() })
                     }
@@ -14243,8 +14253,9 @@ fn convert_messages(messages: &[ConversationMessage]) -> Vec<InputMessage> {
                         }],
                         is_error: *is_error,
                     }),
-                })
-                .collect::<Vec<_>>();
+                    ContentBlock::Image { .. } => None,
+                });
+            }
             (!content.is_empty()).then(|| InputMessage {
                 role: role.to_string(),
                 content,

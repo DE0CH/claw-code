@@ -506,17 +506,8 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "read_file",
-            description: "Read a text file from the workspace.",
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "path": { "type": "string" },
-                    "offset": { "type": "integer", "minimum": 0 },
-                    "limit": { "type": "integer", "minimum": 1 }
-                },
-                "required": ["path"],
-                "additionalProperties": false
-            }),
+            description: read_file_description(),
+            input_schema: read_file_schema(),
             required_permission: PermissionMode::ReadOnly,
         },
         ToolSpec {
@@ -2452,8 +2443,43 @@ fn branch_divergence_output(
 }
 
 #[allow(clippy::needless_pass_by_value)]
+fn read_file_description() -> &'static str {
+    if runtime::images::enabled() {
+        "Read a file from the workspace. Text files return their lines. Images (png, jpg, webp, gif, \
+         heic, bmp, tiff, svg) are shown to you as an image; a PDF shows one page as an image \
+         (`page`, from 1, default 1)."
+    } else {
+        "Read a text file from the workspace."
+    }
+}
+
+fn read_file_schema() -> Value {
+    let mut schema = json!({
+        "type": "object",
+        "properties": {
+            "path": { "type": "string" },
+            "offset": { "type": "integer", "minimum": 0 },
+            "limit": { "type": "integer", "minimum": 1 }
+        },
+        "required": ["path"],
+        "additionalProperties": false
+    });
+    if runtime::images::enabled() {
+        schema["properties"]["page"] = json!({
+            "type": "integer",
+            "minimum": 1,
+            "description": "PDF only: the page to show as an image (from 1)."
+        });
+    }
+    schema
+}
+
 fn run_read_file(input: ReadFileInput) -> Result<String, String> {
     let workspace = std::env::current_dir().map_err(|error| error.to_string())?;
+    // CLAW_IMAGES: images and PDF pages are shown to the model as images
+    if runtime::images::enabled() && runtime::images::is_image_path(&input.path) {
+        return runtime::images::read_image_tool(&workspace, &input.path, input.page);
+    }
     to_pretty_json(
         read_file_in_workspace(&input.path, input.offset, input.limit, &workspace)
             .map_err(io_to_string)?,
@@ -2771,6 +2797,9 @@ struct ReadFileInput {
     path: String,
     offset: Option<usize>,
     limit: Option<usize>,
+    /// CLAW_IMAGES: the PDF page to show
+    #[serde(default)]
+    page: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -5391,6 +5420,8 @@ fn tool_specs_for_allowed_tools(allowed_tools: Option<&BTreeSet<String>>) -> Vec
 }
 
 fn convert_messages(messages: &[ConversationMessage]) -> Vec<InputMessage> {
+    // CLAW_IMAGES: image references are rehydrated from the workdir
+    let mut images = api::images::ImageAttacher::new(messages);
     messages
         .iter()
         .filter_map(|message| {
@@ -5398,10 +5429,13 @@ fn convert_messages(messages: &[ConversationMessage]) -> Vec<InputMessage> {
                 MessageRole::System | MessageRole::User | MessageRole::Tool => "user",
                 MessageRole::Assistant => "assistant",
             };
-            let content = message
-                .blocks
-                .iter()
-                .map(|block| match block {
+            let mut content = Vec::new();
+            for block in &message.blocks {
+                if let ContentBlock::Image { image } = block {
+                    images.attach(&mut content, image);
+                    continue;
+                }
+                let converted = match block {
                     ContentBlock::Text { text } => InputContentBlock::Text { text: text.clone() },
                     ContentBlock::Thinking {
                         thinking,
@@ -5428,11 +5462,12 @@ fn convert_messages(messages: &[ConversationMessage]) -> Vec<InputMessage> {
                         }],
                         is_error: *is_error,
                     },
-                })
-                .filter(
-                    |block| !matches!(block, InputContentBlock::Text { text } if text.is_empty()),
-                )
-                .collect::<Vec<_>>();
+                    ContentBlock::Image { .. } => continue,
+                };
+                if !matches!(&converted, InputContentBlock::Text { text } if text.is_empty()) {
+                    content.push(converted);
+                }
+            }
             (!content.is_empty()).then(|| InputMessage {
                 role: role.to_string(),
                 content,

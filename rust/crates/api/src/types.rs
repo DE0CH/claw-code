@@ -107,13 +107,45 @@ pub enum InputContentBlock {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         is_error: bool,
     },
+    /// An image the model sees (Anthropic `image` block, base64 source).
+    Image {
+        source: ImageSource,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ToolResultContentBlock {
-    Text { text: String },
-    Json { value: Value },
+    Text {
+        text: String,
+    },
+    Json {
+        value: Value,
+    },
+    /// An image in a tool result (Anthropic `image` block, base64 source).
+    Image {
+        source: ImageSource,
+    },
+}
+
+/// An image's bytes: `{"type": "base64", "media_type": "image/png", "data": "…"}`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImageSource {
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub media_type: String,
+    pub data: String,
+}
+
+impl ImageSource {
+    #[must_use]
+    pub fn base64(media_type: impl Into<String>, data: impl Into<String>) -> Self {
+        Self {
+            kind: "base64".to_string(),
+            media_type: media_type.into(),
+            data: data.into(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

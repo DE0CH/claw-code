@@ -341,9 +341,15 @@ where
         }
 
         self.record_turn_started(&user_input);
-        self.session
-            .push_user_text(user_input)
-            .map_err(|error| RuntimeError::new(error.to_string()))?;
+        // CLAW_IMAGES + CLAW_PROMPT_IMAGES: the prompt's attached images go before its text
+        let prompt_message = std::env::current_dir()
+            .ok()
+            .and_then(|cwd| crate::images::prompt_message(&cwd, &user_input));
+        match prompt_message {
+            Some(message) => self.session.push_message(message),
+            None => self.session.push_user_text(user_input),
+        }
+        .map_err(|error| RuntimeError::new(error.to_string()))?;
 
         let mut assistant_messages = Vec::new();
         let mut tool_results = Vec::new();
@@ -470,6 +476,9 @@ where
                                 Ok(output) => (output, false),
                                 Err(error) => (error.to_string(), true),
                             };
+                        // CLAW_IMAGES: read_file on an image carries references to it
+                        let (text, images) = crate::images::split_tool_output(output);
+                        output = text;
                         output = merge_hook_feedback(pre_hook_result.messages(), output, false);
 
                         let post_hook_result = if is_error {
@@ -500,7 +509,15 @@ where
                                 || post_hook_result.is_cancelled(),
                         );
 
-                        ConversationMessage::tool_result(tool_use_id, tool_name, output, is_error)
+                        crate::images::with_images(
+                            ConversationMessage::tool_result(
+                                tool_use_id,
+                                tool_name,
+                                output,
+                                is_error,
+                            ),
+                            images,
+                        )
                     }
                     PermissionOutcome::Deny { reason } => ConversationMessage::tool_result(
                         tool_use_id,
